@@ -18,6 +18,107 @@ struct ScanDoc: Identifiable, Codable {
     var createdAt = Date()
     var pages: [ScanPage] = []
 }
+struct ScanFilterPreset: Identifiable {
+    let id: Int
+    let name: String
+    let description: String
+
+    static let all: [ScanFilterPreset] = [
+        .init(id: 0, name: "원본", description: "보정하지 않은 사진"),
+        .init(id: 1, name: "문서 선명", description: "글자와 색상 또렷하게"),
+        .init(id: 2, name: "회색", description: "깔끔한 회색조"),
+        .init(id: 3, name: "흑백", description: "진한 흑백 인쇄 느낌"),
+        .init(id: 4, name: "고대비", description: "글자 대비 강화"),
+        .init(id: 5, name: "밝은 문서", description: "어두운 종이를 밝게"),
+        .init(id: 6, name: "그림자 완화", description: "그늘진 부분을 밝게"),
+        .init(id: 7, name: "잉크 강조", description: "검은 글씨를 더 진하게"),
+        .init(id: 8, name: "컬러 강화", description: "사진과 컬러 문서"),
+        .init(id: 9, name: "부드럽게", description: "대비와 채도를 낮춤"),
+        .init(id: 10, name: "따뜻한 색감", description: "은은한 온기"),
+        .init(id: 11, name: "차가운 색감", description: "시원하고 차분하게"),
+        .init(id: 12, name: "세피아", description: "빈티지 종이 느낌")
+    ]
+
+    static func name(for id: Int) -> String {
+        all.first(where: { $0.id == id })?.name ?? "원본"
+    }
+}
+
+/// The same processing pipeline is used for thumbnails and PDF exports.
+enum ScanFilterEngine {
+    static func render(_ original: UIImage, preset: Int) -> UIImage {
+        guard preset != 0, var ci = CIImage(image: original) else { return original }
+
+        func controls(_ contrast: Float = 1, _ saturation: Float = 1, _ brightness: Float = 0) {
+            let f = CIFilter.colorControls()
+            f.inputImage = ci
+            f.contrast = contrast
+            f.saturation = saturation
+            f.brightness = brightness
+            ci = f.outputImage ?? ci
+        }
+        func sharpen(_ amount: Float) {
+            let f = CIFilter.sharpenLuminance()
+            f.inputImage = ci
+            f.sharpness = amount
+            ci = f.outputImage ?? ci
+        }
+
+        switch preset {
+        case 1:
+            controls(1.28, 1.08, 0.03)
+            sharpen(0.40)
+        case 2:
+            controls(1.0, 0, 0)
+        case 3:
+            let f = CIFilter.photoEffectNoir()
+            f.inputImage = ci
+            ci = f.outputImage ?? ci
+        case 4:
+            controls(1.65, 0, -0.02)
+        case 5:
+            controls(1.16, 0.92, 0.12)
+        case 6:
+            let f = CIFilter.highlightShadowAdjust()
+            f.inputImage = ci
+            f.shadowAmount = 0.85
+            f.highlightAmount = 1.0
+            ci = f.outputImage ?? ci
+            controls(1.07, 0.98, 0.03)
+        case 7:
+            controls(1.54, 0.12, -0.035)
+            sharpen(0.65)
+        case 8:
+            controls(1.14, 1.28, 0.02)
+            sharpen(0.30)
+        case 9:
+            controls(0.85, 0.86, 0.045)
+        case 10:
+            let f = CIFilter.sepiaTone()
+            f.inputImage = ci
+            f.intensity = 0.26
+            ci = f.outputImage ?? ci
+        case 11:
+            let f = CIFilter(name: "CITemperatureAndTint", parameters: [
+                kCIInputImageKey: ci,
+                "inputNeutral": CIVector(x: 6500, y: 0),
+                "inputTargetNeutral": CIVector(x: 7900, y: 0)
+            ])
+            ci = f?.outputImage ?? ci
+        case 12:
+            let f = CIFilter.sepiaTone()
+            f.inputImage = ci
+            f.intensity = 0.86
+            ci = f.outputImage ?? ci
+        default:
+            return original
+        }
+
+        guard let rendered = CIContext().createCGImage(ci, from: ci.extent) else { return original }
+        return UIImage(cgImage: rendered, scale: original.scale, orientation: .up)
+    }
+}
+
 struct ScanPage: Identifiable, Codable {
     var id = UUID()
     var file: String
@@ -62,34 +163,31 @@ final class ScanStore: ObservableObject {
         for p in doc.pages { try? FileManager.default.removeItem(at: folder.appendingPathComponent(p.file)) }
         docs.removeAll { $0.id == doc.id }; save()
     }
+    func previewSource(_ page: ScanPage) -> UIImage? {
+        guard let original = UIImage(contentsOfFile: folder.appendingPathComponent(page.file).path),
+              original.size.width > 0, original.size.height > 0 else { return nil }
+        let scale = min(1, 220 / max(original.size.width, original.size.height))
+        let size = CGSize(width: original.size.width * scale, height: original.size.height * scale)
+        return UIGraphicsImageRenderer(size: size).image { _ in
+            original.draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
     func image(_ page: ScanPage) -> UIImage? {
         guard let original = UIImage(contentsOfFile: folder.appendingPathComponent(page.file).path) else { return nil }
-        var output = original
-        if page.filter != 0, let ci = CIImage(image: original) {
-            let filter: CIFilter
-            switch page.filter {
-            case 1:
-                let f = CIFilter.colorControls()
-                f.inputImage = ci; f.contrast = 1.28; f.saturation = 1.08; f.brightness = 0.03
-                filter = f
-            case 2:
-                let f = CIFilter.colorControls()
-                f.inputImage = ci; f.saturation = 0
-                filter = f
-            default:
-                let f = CIFilter.photoEffectNoir()
-                f.inputImage = ci; filter = f
-            }
-            if let result = filter.outputImage, let cg = CIContext().createCGImage(result, from: result.extent) { output = UIImage(cgImage: cg) }
-        }
+        var output = ScanFilterEngine.render(original, preset: page.filter)
         if page.rotation != 0 {
             let angle = CGFloat(page.rotation) * .pi / 180
-            let canvas = CGRect(origin: .zero, size: output.size).applying(CGAffineTransform(rotationAngle: angle)).standardized.size
-            let format = UIGraphicsImageRendererFormat(); format.scale = output.scale
+            let canvas = CGRect(origin: .zero, size: output.size)
+                .applying(CGAffineTransform(rotationAngle: angle)).standardized.size
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = output.scale
+            let source = output
             output = UIGraphicsImageRenderer(size: canvas, format: format).image { ctx in
                 ctx.cgContext.translateBy(x: canvas.width / 2, y: canvas.height / 2)
                 ctx.cgContext.rotate(by: angle)
-                output.draw(in: CGRect(x: -output.size.width / 2, y: -output.size.height / 2, width: output.size.width, height: output.size.height))
+                source.draw(in: CGRect(x: -source.size.width / 2,
+                                       y: -source.size.height / 2,
+                                       width: source.size.width, height: source.size.height))
             }
         }
         return output
@@ -190,7 +288,7 @@ final class GitHubUpdateChecker: ObservableObject {
             var request = URLRequest(url: url)
             request.timeoutInterval = 15
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            request.setValue("PocketScan-iOS/1.1", forHTTPHeaderField: "User-Agent")
+            request.setValue("PocketScan-iOS/1.2", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 message = "GitHub 서버에서 최신 버전을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요."
@@ -242,7 +340,7 @@ struct HomeView: View {
                             Label("GitHub 업데이트", systemImage: "arrow.triangle.2.circlepath")
                                 .font(.headline)
                             Spacer()
-                            Text("v1.1").font(.caption).foregroundStyle(.secondary)
+                            Text("v1.2").font(.caption).foregroundStyle(.secondary)
                         }
                         Text("GitHub에서 빌드에 성공한 새 IPA가 있는지 확인합니다.")
                             .font(.footnote).foregroundStyle(.secondary)
@@ -323,6 +421,89 @@ struct HomeView: View {
     }
 }
 
+struct FilterPickerView: View {
+    @EnvironmentObject private var store: ScanStore
+    @Environment(\.dismiss) private var dismiss
+
+    let page: ScanPage
+    let onSelect: (Int) -> Void
+    @State private var previews: [Int: UIImage] = [:]
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(ScanFilterPreset.all) { preset in
+                        Button {
+                            onSelect(preset.id)
+                            dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ZStack(alignment: .topTrailing) {
+                                    Group {
+                                        if let thumbnail = previews[preset.id] {
+                                            Image(uiImage: thumbnail)
+                                                .resizable()
+                                                .scaledToFit()
+                                        } else {
+                                            Image(systemName: "doc.text.image")
+                                                .resizable()
+                                                .scaledToFit()
+                                                .padding(32)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 155)
+                                    .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                                    if page.filter == preset.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.title2)
+                                            .foregroundStyle(.teal)
+                                            .padding(7)
+                                    }
+                                }
+                                Text(preset.name)
+                                    .font(.subheadline.bold())
+                                    .foregroundStyle(.primary)
+                                Text(preset.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            .padding(10)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground),
+                                        in: RoundedRectangle(cornerRadius: 15))
+                            .overlay(RoundedRectangle(cornerRadius: 15)
+                                .stroke(page.filter == preset.id ? Color.teal : .clear, lineWidth: 2))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding()
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("필터 선택")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("닫기") { dismiss() }
+                }
+            }
+            .onAppear {
+                guard previews.isEmpty, let source = store.previewSource(page) else { return }
+                for preset in ScanFilterPreset.all {
+                    previews[preset.id] = ScanFilterEngine.render(source, preset: preset.id)
+                }
+            }
+        }
+    }
+}
+
 struct EditorView: View {
     @EnvironmentObject var store: ScanStore
     @Environment(\.dismiss) var dismiss
@@ -331,6 +512,7 @@ struct EditorView: View {
     @State private var cameraUnavailable = false
     @State private var selection: [PhotosPickerItem] = []
     @State private var share: SharePDF?
+    @State private var filterPage: ScanPage?
     @State private var rename = false
     @State private var title = ""
     private var doc: ScanDoc? { store.docs.first { $0.id == docID } }
@@ -353,13 +535,11 @@ struct EditorView: View {
                                 HStack {
                                     Text("\(index + 1) / \(doc.pages.count)").font(.caption).foregroundStyle(.secondary)
                                     Spacer()
-                                    Menu {
-                                        ForEach(0..<4, id: \.self) { f in
-                                            Button(["원본", "선명하게", "회색", "흑백"][f]) {
-                                                editPage(page.id) { $0.filter = f }
-                                            }
-                                        }
-                                    } label: { Label("필터", systemImage: "slider.horizontal.3") }
+                                    Button {
+                                        filterPage = page
+                                    } label: {
+                                        Label(ScanFilterPreset.name(for: page.filter), systemImage: "slider.horizontal.3")
+                                    }
                                     Button { editPage(page.id) { $0.rotation = ($0.rotation + 90) % 360 } } label: { Image(systemName: "rotate.right") }
                                     Button { move(index, -1) } label: { Image(systemName: "arrow.up") }.disabled(index == 0)
                                     Button { move(index, 1) } label: { Image(systemName: "arrow.down") }.disabled(index + 1 >= doc.pages.count)
@@ -393,6 +573,12 @@ struct EditorView: View {
             ScanCamera(complete: { images in camera = false; add(images) }, cancel: { camera = false })
         }
 
+        .sheet(item: $filterPage) { page in
+            FilterPickerView(page: page) { filterID in
+                editPage(page.id) { $0.filter = filterID }
+            }
+            .environmentObject(store)
+        }
         .sheet(item: $share) { ShareSheet(url: $0.url) }
         .alert("카메라를 열 수 없습니다", isPresented: $cameraUnavailable) {
             Button("확인", role: .cancel) {}
