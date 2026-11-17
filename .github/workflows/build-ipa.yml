@@ -27,6 +27,12 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
+      - name: Record source revision and app version
+        run: |
+          set -euo pipefail
+          /usr/libexec/PlistBuddy -c "Add :PocketScanBuildSHA string ${GITHUB_SHA}" PocketScan/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.1" PocketScan/Info.plist
+
       - name: Build iOS application without signing
         run: |
           set -euo pipefail
