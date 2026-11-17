@@ -1,0 +1,37 @@
+name: Build iPhone IPA (free, unsigned)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "PocketScan/**"
+      - "project.yml"
+      - ".github/workflows/build-ipa.yml"
+permissions:
+  contents: read
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate --spec project.yml
+      - name: Build without signing
+        run: |
+          set -euo pipefail
+          xcodebuild -project PocketScan.xcodeproj -scheme PocketScan -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "${{ runner.temp }}/derived" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          mkdir -p Payload
+          cp -R "${{ runner.temp }}/derived/Build/Products/Release-iphoneos/PocketScan.app" Payload/
+          zip -qr PocketScan-unsigned.ipa Payload
+          unzip -t PocketScan-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketScan-unsigned-IPA
+          path: PocketScan-unsigned.ipa
+          retention-days: 14
